@@ -1,0 +1,22 @@
+{
+  "name": "canva-pressero-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --config vite.bundle.config.ts",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@canva/app-ui-kit": "^2.0.0",
+    "@canva/design": "^2.7.3",
+    "@canva/intents": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4"
+  }
+}
