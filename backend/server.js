@@ -34,6 +34,7 @@ globalThis._pdfStore = store;
 app.post("/canva/export", async (req, res) => {
   try {
     const { files = [], sessionId, exportTitle } = req.body || {};
+    console.log("📥 /canva/export", { sessionId, firstUrl: files?.[0] });
     if (!Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ ok: false, message: "No files" });
     }
@@ -97,7 +98,7 @@ app.post("/pressero/upload", async (req, res) => {
       url: publicUrl,
       at: Date.now(),
     });
-
+console.log("✅ stored", sessionId);
     return res.json({ ok: true, url: publicUrl });
   } catch (err) {
     console.error(err?.message || err);
@@ -107,13 +108,12 @@ app.post("/pressero/upload", async (req, res) => {
 
 /* ===== /pressero/ready : poll depuis Pressero ===== */
 app.get("/pressero/ready", (req, res) => {
-  res.setHeader("Cache-Control", "no-store"); // évite 304 côté proxy/navigateur
+  res.setHeader("Cache-Control", "no-store");
   const id = req.query.sessionId;
-  const entry = id ? store.get(id) : null;
-  if (entry?.url) {
-    return res.json({ ready: true, url: entry.url });
-  }
-  return res.json({ ready: false });
+  const has = id && store.has(id);
+  const entry = has ? store.get(id) : null;
+  console.log("🔎 ready?", id, "->", !!entry?.url);                        // 👈 debug
+  return res.json(entry?.url ? { ready: true, url: entry.url } : { ready: false });
 });
 
 /* ===== Start ===== */
