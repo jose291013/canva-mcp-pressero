@@ -61,4 +61,49 @@ app.post("/canva/export", async (req, res) => {
 });
 
 const port = process.env.PORT || 10000;
+// --- Mémoire simple (démos) : sessionId -> { url | buffer } ---
+const store = new Map();
+
+// Expose un PDF en HTTPS par sessionId (demo)
+// GET /files/:sessionId.pdf -> retourne le PDF téléchargé par Albato
+app.get("/files/:sessionId.pdf", (req, res) => {
+  const { sessionId } = req.params;
+  const entry = store.get(sessionId);
+  if (!entry || !entry.buffer) {
+    return res.status(404).send("Not found");
+  }
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Cache-Control", "no-store");
+  return res.send(entry.buffer);
+});
+
+// Albato -> Backend : dépose le PDF (base64) + sessionId
+app.post("/pressero/upload", async (req, res) => {
+  try {
+    const { sessionId, filename = "design.pdf", fileBase64 } = req.body || {};
+    if (!sessionId || !fileBase64) {
+      return res.status(400).json({ ok: false, message: "Missing sessionId or fileBase64" });
+    }
+    const buf = Buffer.from(fileBase64, "base64");
+    // on mémorise le buffer et une URL publique pour le front Pressero
+    const publicUrl = `${process.env.BASE_PUBLIC_URL || "https://canva-mcp-pressero.onrender.com"}/files/${encodeURIComponent(sessionId)}.pdf`;
+    store.set(sessionId, { buffer: buf, filename, url: publicUrl, at: Date.now() });
+    return res.json({ ok: true, url: publicUrl });
+  } catch (e) {
+    console.error(e?.message || e);
+    return res.status(500).json({ ok: false, message: "Upload failed" });
+  }
+});
+
+// Front Pressero -> poll si prêt
+// GET /pressero/ready?sessionId=...
+app.get("/pressero/ready", async (req, res) => {
+  const sessionId = req.query.sessionId;
+  const entry = sessionId ? store.get(sessionId) : null;
+  if (entry?.url) {
+    return res.json({ ready: true, url: entry.url });
+  }
+  return res.json({ ready: false });
+});
+
 app.listen(port, () => console.log("🚀 Backend listening on", port));
