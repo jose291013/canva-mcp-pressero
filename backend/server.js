@@ -8,17 +8,19 @@ app.use(morgan("tiny"));
 app.use(express.json({ limit: "20mb" }));
 
 // CORS : autorise Canva + localhost (dev)
-app.use(
-  cors({
-    origin: [
-      /\.canva\.com$/,
-      "https://localhost:8080",
-      "https://127.0.0.1:8080"
-    ],
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"]
-  })
-);
+import cors from "cors";
+
+// …
+app.use(cors({
+  origin: true,                     // reflète l’origine qui appelle (Canva, localhost, etc.)
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  maxAge: 86400
+}));
+
+// (facultatif mais propre) : handler préflight explicite
+app.options("/canva/export", cors());
+
 
 // Health check
 app.get("/health", (_req, res) => res.json({ ok: true }));
