@@ -1,58 +1,64 @@
+// backend/server.js
 import express from "express";
-import cors from "cors";
+import cors from "cors";          // <-- un seul import cors
 import morgan from "morgan";
 import axios from "axios";
 
 const app = express();
+
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "20mb" }));
 
-// CORS : autorise Canva + localhost (dev)
-import cors from "cors";
+// CORS ouvert (debug) : accepte Canva + tout origine
+app.use(
+  cors({
+    origin: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    maxAge: 86400,
+  })
+);
 
-// …
-app.use(cors({
-  origin: true,                     // reflète l’origine qui appelle (Canva, localhost, etc.)
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  maxAge: 86400
-}));
-
-// (facultatif mais propre) : handler préflight explicite
+// (optionnel) préflight explicite
 app.options("/canva/export", cors());
 
-
-// Health check
+// Health
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Reçoit l’URL PDF de Canva et la relaie vers Albato (exemple)
+// Reçoit l’URL du PDF exporté par Canva et relaie vers Albato (si ALBATO_WEBHOOK_URL)
 app.post("/canva/export", async (req, res) => {
   try {
-    const { files = [], sessionId, exportTitle } = req.body || {};
-    if (!files.length) return res.status(400).json({ ok: false, message: "No files" });
+    console.log("📥 Body reçu:", req.body);
+
+    const raw = Array.isArray(req.body?.files) ? req.body.files : [];
+    const files = raw.filter((u) => typeof u === "string" && /^https?:\/\//.test(u));
+    if (files.length === 0) {
+      return res.status(400).json({ ok: false, message: "No files" });
+    }
 
     const pdfUrl = files[0];
     const pdfResp = await axios.get(pdfUrl, { responseType: "arraybuffer" });
     const pdfB64 = Buffer.from(pdfResp.data).toString("base64");
 
-    // Envoie vers ton webhook Albato (à définir dans les vars Render)
     const albatoUrl = process.env.ALBATO_WEBHOOK_URL;
     if (albatoUrl) {
       await axios.post(albatoUrl, {
-        sessionId,
-        exportTitle,
+        sessionId: req.body.sessionId,
+        exportTitle: req.body.exportTitle,
         filename: "design.pdf",
-        fileBase64: pdfB64
+        fileBase64: pdfB64,
       });
     }
 
-    res.json({ ok: true, url: "https://example.com/designs/" + (sessionId || "sample") + ".pdf" });
+    return res.json({
+      ok: true,
+      url: "https://example.com/designs/" + (req.body.sessionId || "sample") + ".pdf",
+    });
   } catch (e) {
     console.error(e?.message || e);
-    res.status(500).json({ ok: false, message: "Export failed" });
+    return res.status(500).json({ ok: false, message: "Export failed" });
   }
 });
 
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log("🚀 Backend listening on", port));
-
