@@ -47,26 +47,28 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 const store = global._pdfStore || new Map();
 global._pdfStore = store;
 
-// Canva -> backend : on stocke le PDF sous la clé "sid" (cookie)
+// POST /canva/export  => stocke par sessionId (obligatoire)
 app.post("/canva/export", async (req, res) => {
   try {
-    const sid = getOrCreateSid(req, res);
-    const { files = [], exportTitle } = req.body || {};
-    if (!Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ ok: false, message: "No files" });
-    }
+    const { files = [], sessionId, exportTitle } = req.body || {};
+    if (!Array.isArray(files) || !files.length)
+      return res.status(400).json({ ok:false, message:"No files" });
+    if (!sessionId || typeof sessionId !== "string")
+      return res.status(400).json({ ok:false, message:"Missing sessionId" });
+
     const pdfUrl = files[0];
     const pdfResp = await axios.get(pdfUrl, { responseType: "arraybuffer" });
     const buf = Buffer.from(pdfResp.data);
 
     const base = process.env.BASE_PUBLIC_URL || "https://canva-mcp-pressero.onrender.com";
-    const publicUrl = `${base}/files/${encodeURIComponent(sid)}.pdf`;
+    const publicUrl = `${base}/files/${encodeURIComponent(sessionId)}.pdf`;
 
-    store.set(sid, { buffer: buf, url: publicUrl, at: Date.now(), title: exportTitle || "" });
+    store.set(sessionId, { buffer: buf, filename: "design.pdf", url: publicUrl, at: Date.now(), title: exportTitle || "" });
+
     return res.json({ ok: true, url: publicUrl });
   } catch (e) {
     console.error(e?.message || e);
-    return res.status(500).json({ ok: false, message: "Export failed" });
+    return res.status(500).json({ ok:false, message:"Export failed" });
   }
 });
 
@@ -79,12 +81,37 @@ app.get("/files/:sid.pdf", (req, res) => {
   res.send(entry.buffer);
 });
 
-// Pressero -> backend : poll “ready” via cookie "sid"
+// GET /pressero/ready?sessionId=... => renvoie uniquement l’état pour CET id
 app.get("/pressero/ready", (req, res) => {
-  const sid = getOrCreateSid(req, res);
-  const entry = store.get(sid);
-  if (entry?.url) return res.json({ ready: true, url: entry.url });
-  return res.json({ ready: false });
+  const sessionId = req.query.sessionId;
+  if (!sessionId || typeof sessionId !== "string")
+    return res.json({ ready:false });
+
+  const entry = store.get(sessionId);
+  if (entry?.url) {
+    // Optionnel: auto-expire les entrées >15min
+    const maxAgeMs = 15 * 60 * 1000;
+    if (Date.now() - (entry.at || 0) > maxAgeMs) {
+      store.delete(sessionId);
+      return res.json({ ready:false });
+    }
+    return res.json({ ready:true, url: entry.url });
+  }
+  return res.json({ ready:false });
+});
+
+// (optionnel) GET /files/:sessionId.pdf -> envoie & PURGE pour éviter réutilisation
+app.get("/files/:sessionId.pdf", (req, res) => {
+  const { sessionId } = req.params;
+  const entry = store.get(sessionId);
+  if (!entry?.buffer) return res.status(404).send("Not found");
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Cache-Control", "no-store");
+  res.send(entry.buffer);
+
+  // 🧹 Facultatif : purge après premier téléchargement
+  try { store.delete(sessionId); } catch {}
 });
 
 const port = process.env.PORT || 10000;
