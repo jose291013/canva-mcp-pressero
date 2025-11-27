@@ -6,6 +6,45 @@ import axios from "axios";
 import cookieParser from "cookie-parser";
 import crypto from "crypto";
 
+// ======== CONFIG OAUTH CANVA ========
+const BASE = process.env.BASE_PUBLIC_URL || "https://canva-mcp-pressero.onrender.com";
+
+const CANVA_CLIENT_ID     = process.env.CANVA_CLIENT_ID;
+const CANVA_CLIENT_SECRET = process.env.CANVA_CLIENT_SECRET;
+const CANVA_SCOPES        = process.env.CANVA_SCOPES || "design:content:write design:meta:read";
+
+if (!CANVA_CLIENT_ID || !CANVA_CLIENT_SECRET) {
+  console.warn("[WARN] CANVA_CLIENT_ID ou CANVA_CLIENT_SECRET manquant(s). OAuth ne fonctionnera pas.");
+}
+
+// redirect URI pour Canva
+const CANVA_REDIRECT_URI = `${BASE}/canva/oauth/callback`;
+
+// Stockage en mémoire : userKey -> tokens
+const userTokens = global._userTokens || new Map();
+global._userTokens = userTokens;
+
+// Stockage des états OAuth (PKCE) : state -> { userKey, codeVerifier }
+const oauthStates = global._oauthStates || new Map();
+global._oauthStates = oauthStates;
+
+// Helpers PKCE
+function base64UrlEncode(buf) {
+  return buf.toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function generateCodeVerifier() {
+  return base64UrlEncode(crypto.randomBytes(32));
+}
+
+function generateCodeChallenge(verifier) {
+  const hash = crypto.createHash("sha256").update(verifier).digest();
+  return base64UrlEncode(hash);
+}
+
 const app = express();
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "20mb" }));
@@ -24,7 +63,7 @@ app.use(cors({
 const inbox = global._inbox || new Map();
 global._inbox = inbox;
 
-const BASE = process.env.BASE_PUBLIC_URL || "https://canva-mcp-pressero.onrender.com";
+
 
 // ------------------- util cookie sid -------------------
 function ensureSid(req, res) {
@@ -51,23 +90,94 @@ function mmToPx(mm) {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+async function getAccessTokenForUser(userKey) {
+  if (!userKey) return { ok: false, reason: "missing_userKey" };
+
+  const rec = userTokens.get(userKey);
+  if (!rec) {
+    // Pas encore de token → besoin d’OAuth
+    return { ok: false, reason: "no_token" };
+  }
+
+  const now = Date.now();
+  // marge 60s avant l’expiration
+  if (rec.expiresAt && rec.expiresAt - 60_000 > now) {
+    return { ok: true, token: rec.accessToken };
+  }
+
+  // Token expiré → tenter un refresh
+  if (!rec.refreshToken) {
+    userTokens.delete(userKey);
+    return { ok: false, reason: "no_refresh_token" };
+  }
+
+  try {
+    const body = new URLSearchParams();
+    body.set("grant_type", "refresh_token");
+    body.set("refresh_token", rec.refreshToken);
+    body.set("client_id", CANVA_CLIENT_ID);
+    body.set("client_secret", CANVA_CLIENT_SECRET);
+
+    const resp = await axios.post(
+      "https://api.canva.com/rest/v1/oauth/token",
+      body.toString(),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 10000
+      }
+    );
+
+    const data = resp.data;
+    const accessToken  = data.access_token;
+    const refreshToken = data.refresh_token || rec.refreshToken;
+    const expiresIn    = data.expires_in || 3600;
+
+    userTokens.set(userKey, {
+      accessToken,
+      refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000
+    });
+
+    return { ok: true, token: accessToken };
+  } catch (err) {
+    console.error("Erreur refresh token Canva pour", userKey, err?.response?.data || err.message);
+    userTokens.delete(userKey);
+    return { ok: false, reason: "refresh_failed" };
+  }
+}
+
+
 // ========== NOUVEAU : PRESZERO -> créer un design Canva custom ==========
+// ========== PRESZERO -> créer un design Canva custom, par utilisateur ==========
 app.post("/canva/create-design", async (req, res) => {
   try {
-    const sid = ensureSid(req, res); // on pose le cookie si besoin
-    const { widthMm, heightMm, title } = req.body || {};
+    const sid = ensureSid(req, res);
+    const { widthMm, heightMm, title, userKey } = req.body || {};
 
     if (!widthMm || !heightMm) {
       return res.status(400).json({ ok: false, message: "Missing widthMm/heightMm" });
     }
+    if (!userKey) {
+      return res.status(400).json({ ok: false, message: "Missing userKey" });
+    }
+
+    // 1) Essayer d'obtenir un token valide pour ce userKey
+    const tokenResult = await getAccessTokenForUser(userKey);
+    if (!tokenResult.ok) {
+      // Pas de token ou refresh impossible → demander une auth Canva
+      const authUrl = `${BASE}/canva/oauth/start?userKey=${encodeURIComponent(userKey)}`;
+      return res.json({
+        ok: false,
+        needAuth: true,
+        authUrl,
+        reason: tokenResult.reason
+      });
+    }
+
+    const accessToken = tokenResult.token;
 
     const widthPx  = mmToPx(Number(widthMm));
     const heightPx = mmToPx(Number(heightMm));
-
-    const token = process.env.CANVA_ACCESS_TOKEN;
-    if (!token) {
-      return res.status(500).json({ ok: false, message: "Missing CANVA_ACCESS_TOKEN env var" });
-    }
 
     const body = {
       design_type: {
@@ -83,7 +193,7 @@ app.post("/canva/create-design", async (req, res) => {
       body,
       {
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json"
         },
         timeout: 10000
@@ -108,6 +218,7 @@ app.post("/canva/create-design", async (req, res) => {
     return res.status(500).json({ ok: false, message: "Canva create-design failed" });
   }
 });
+
 
 // ========== CANVA → dépose un PDF ==========
 app.post("/canva/export", async (req, res) => {
@@ -154,6 +265,116 @@ app.post("/pressero/clear", (req, res) => {
   if (sid) inbox.delete(sid);
   return res.json({ ok:true });
 });
+
+// ======== OAUTH START : redirige vers Canva pour ce userKey ========
+app.get("/canva/oauth/start", (req, res) => {
+  try {
+    const userKey = (req.query.userKey || "").toString();
+    if (!userKey) {
+      return res.status(400).send("Missing userKey");
+    }
+    if (!CANVA_CLIENT_ID) {
+      return res.status(500).send("Canva OAuth not configured");
+    }
+
+    const codeVerifier  = generateCodeVerifier();
+    const codeChallenge = generateCodeChallenge(codeVerifier);
+
+    const state = base64UrlEncode(crypto.randomBytes(16)) + "." + base64UrlEncode(Buffer.from(userKey));
+    oauthStates.set(state, {
+      userKey,
+      codeVerifier,
+      createdAt: Date.now()
+    });
+
+    const params = new URLSearchParams();
+    params.set("client_id", CANVA_CLIENT_ID);
+    params.set("redirect_uri", CANVA_REDIRECT_URI);
+    params.set("response_type", "code");
+    params.set("scope", CANVA_SCOPES);
+    params.set("state", state);
+    params.set("code_challenge", codeChallenge);
+    params.set("code_challenge_method", "S256");
+
+    const url = `https://www.canva.com/api/oauth/authorize?${params.toString()}`;
+    return res.redirect(url);
+  } catch (e) {
+    console.error("Erreur /canva/oauth/start", e);
+    return res.status(500).send("OAuth start error");
+  }
+});
+
+// ======== OAUTH CALLBACK : Canva renvoie code + state ========
+app.get("/canva/oauth/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
+
+    const record = oauthStates.get(state);
+    if (!record) {
+      return res.status(400).send("Invalid or expired state");
+    }
+    oauthStates.delete(state);
+
+    const { userKey, codeVerifier } = record;
+    if (!userKey || !codeVerifier) {
+      return res.status(400).send("Invalid state payload");
+    }
+
+    const body = new URLSearchParams();
+    body.set("grant_type", "authorization_code");
+    body.set("code", code.toString());
+    body.set("redirect_uri", CANVA_REDIRECT_URI);
+    body.set("client_id", CANVA_CLIENT_ID);
+    body.set("code_verifier", codeVerifier);
+    // Si Canva exige aussi client_secret pour ce flow :
+    body.set("client_secret", CANVA_CLIENT_SECRET);
+
+    const resp = await axios.post(
+      "https://api.canva.com/rest/v1/oauth/token",
+      body.toString(),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 10000
+      }
+    );
+
+    const data = resp.data;
+    const accessToken  = data.access_token;
+    const refreshToken = data.refresh_token;
+    const expiresIn    = data.expires_in || 3600;
+
+    userTokens.set(userKey, {
+      accessToken,
+      refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000
+    });
+
+    console.log("[Canva OAuth] Tokens enregistrés pour", userKey);
+
+    // petite page que le client voit dans la popup
+    return res.send(`
+      <html>
+        <head><meta charset="utf-8"><title>Canva connecté</title></head>
+        <body style="font-family: system-ui; text-align:center; padding:20px;">
+          <h2>Votre compte Canva est connecté</h2>
+          <p>Vous pouvez fermer cette fenêtre et revenir sur Pressero.</p>
+          <script>
+            setTimeout(function(){
+              if (window.close) window.close();
+            }, 1500);
+          </script>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error("Erreur /canva/oauth/callback", err?.response?.data || err.message);
+    return res.status(500).send("OAuth callback error");
+  }
+});
+
 
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log("🚀 Backend listening on", port));
