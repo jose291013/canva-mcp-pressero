@@ -26,12 +26,11 @@ global._inbox = inbox;
 
 const BASE = process.env.BASE_PUBLIC_URL || "https://canva-mcp-pressero.onrender.com";
 
-// Util: garantit un cookie sid
+// ------------------- util cookie sid -------------------
 function ensureSid(req, res) {
   let sid = req.cookies?.sid;
   if (!sid) {
     sid = crypto.randomBytes(16).toString("hex");
-    // SameSite=None + Secure pour l’iframe Canva
     res.cookie("sid", sid, {
       httpOnly: false,
       sameSite: "none",
@@ -42,9 +41,75 @@ function ensureSid(req, res) {
   return sid;
 }
 
+// ------------------- util mm -> px -------------------
+const MM_PER_INCH = 25.4;
+const DPI = Number(process.env.CANVA_DPI || "96");
+
+function mmToPx(mm) {
+  return Math.round((mm / MM_PER_INCH) * DPI);
+}
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// === CANVA → dépose un PDF sans sessionId (cookie sid suffit)
+// ========== NOUVEAU : PRESZERO -> créer un design Canva custom ==========
+app.post("/canva/create-design", async (req, res) => {
+  try {
+    const sid = ensureSid(req, res); // on pose le cookie si besoin
+    const { widthMm, heightMm, title } = req.body || {};
+
+    if (!widthMm || !heightMm) {
+      return res.status(400).json({ ok: false, message: "Missing widthMm/heightMm" });
+    }
+
+    const widthPx  = mmToPx(Number(widthMm));
+    const heightPx = mmToPx(Number(heightMm));
+
+    const token = process.env.CANVA_ACCESS_TOKEN;
+    if (!token) {
+      return res.status(500).json({ ok: false, message: "Missing CANVA_ACCESS_TOKEN env var" });
+    }
+
+    const body = {
+      design_type: {
+        type: "custom",
+        width: widthPx,
+        height: heightPx
+      },
+      title: title || `Pressero ${widthMm}×${heightMm} mm`
+    };
+
+    const resp = await axios.post(
+      "https://api.canva.com/rest/v1/designs",
+      body,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        timeout: 10000
+      }
+    );
+
+    const data = resp.data || {};
+    const editUrl =
+      data?.design?.urls?.edit_url ||
+      data?.urls?.edit_url ||
+      data?.urls?.edit ||
+      data?.edit_url;
+
+    if (!editUrl) {
+      console.error("Canva /designs => pas de edit_url", JSON.stringify(data).slice(0, 500));
+      return res.status(500).json({ ok: false, message: "No edit_url returned by Canva" });
+    }
+
+    return res.json({ ok: true, editUrl });
+  } catch (err) {
+    console.error("Erreur /canva/create-design:", err?.response?.status, err?.response?.data || err.message);
+    return res.status(500).json({ ok: false, message: "Canva create-design failed" });
+  }
+});
+
+// ========== CANVA → dépose un PDF ==========
 app.post("/canva/export", async (req, res) => {
   try {
     const sid = ensureSid(req, res);
@@ -65,7 +130,7 @@ app.post("/canva/export", async (req, res) => {
   }
 });
 
-// === Fichier public (servi par sid)
+// ========== Fichier public (servi par sid) ==========
 app.get("/files/:sid.pdf", (req, res) => {
   const entry = inbox.get(req.params.sid);
   if (!entry?.buffer) return res.status(404).send("Not found");
@@ -74,9 +139,8 @@ app.get("/files/:sid.pdf", (req, res) => {
   return res.send(entry.buffer);
 });
 
-// === PRESZERO → poll par cookie sid
+// ========== PRESZERO → poll par cookie sid ==========
 app.get("/pressero/ready", (req, res) => {
-  // on ne lit plus ?sessionId — on lit le cookie
   const sid = req.cookies?.sid;
   const entry = sid ? inbox.get(sid) : null;
   console.log("🔎 ready? sid=", sid, "→", !!entry);
@@ -84,7 +148,7 @@ app.get("/pressero/ready", (req, res) => {
   return res.json({ ready:false });
 });
 
-// === PRESZERO → clear après injection pour éviter réinjection
+// ========== PRESZERO → clear ==========
 app.post("/pressero/clear", (req, res) => {
   const sid = req.cookies?.sid;
   if (sid) inbox.delete(sid);
@@ -93,5 +157,6 @@ app.post("/pressero/clear", (req, res) => {
 
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log("🚀 Backend listening on", port));
+
 
 

@@ -3,4 +3,3 @@ dist/
 frontend/dist/
 *.env
 certs/
-
