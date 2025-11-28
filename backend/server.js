@@ -150,10 +150,10 @@ async function getAccessTokenForUser(userKey) {
 // ========== NOUVEAU : PRESZERO -> créer un design Canva custom ==========
 // ========== PRESZERO -> créer un design Canva custom, par utilisateur ==========
 app.post("/canva/create-design", async (req, res) => {
-  try {
-    const sid = ensureSid(req, res);
-    const { widthMm, heightMm, title, userKey } = req.body || {};
+  const sid = ensureSid(req, res);
+  const { widthMm, heightMm, title, userKey } = req.body || {};
 
+  try {
     if (!widthMm || !heightMm) {
       return res.status(400).json({ ok: false, message: "Missing widthMm/heightMm" });
     }
@@ -161,10 +161,9 @@ app.post("/canva/create-design", async (req, res) => {
       return res.status(400).json({ ok: false, message: "Missing userKey" });
     }
 
-    // 1) Essayer d'obtenir un token valide pour ce userKey
+    // 1) Token pour ce userKey
     const tokenResult = await getAccessTokenForUser(userKey);
     if (!tokenResult.ok) {
-      // Pas de token ou refresh impossible → demander une auth Canva
       const authUrl = `${BASE}/canva/oauth/start?userKey=${encodeURIComponent(userKey)}`;
       return res.json({
         ok: false,
@@ -175,7 +174,6 @@ app.post("/canva/create-design", async (req, res) => {
     }
 
     const accessToken = tokenResult.token;
-
     const widthPx  = mmToPx(Number(widthMm));
     const heightPx = mmToPx(Number(heightMm));
 
@@ -214,10 +212,36 @@ app.post("/canva/create-design", async (req, res) => {
 
     return res.json({ ok: true, editUrl });
   } catch (err) {
-    console.error("Erreur /canva/create-design:", err?.response?.status, err?.response?.data || err.message);
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+
+    console.error("Erreur /canva/create-design:", status, data || err.message);
+
+    // 🔴 Cas spécial : token révoqué → on efface et on redemande une connexion
+    if (
+      status === 401 &&
+      data &&
+      (data.code === "revoked_access_token" || data.code === "invalid_grant")
+    ) {
+      if (userKey) {
+        userTokens.delete(userKey);
+        console.warn("[Canva OAuth] Tokens supprimés pour", userKey, "car access_token révoqué");
+      }
+
+      const authUrl = `${BASE}/canva/oauth/start?userKey=${encodeURIComponent(userKey || "")}`;
+      return res.status(200).json({
+        ok: false,
+        needAuth: true,
+        authUrl,
+        reason: data.code,
+        message: "Canva access token revoked, please reconnect."
+      });
+    }
+
     return res.status(500).json({ ok: false, message: "Canva create-design failed" });
   }
 });
+
 
 
 // ========== CANVA → dépose un PDF ==========
