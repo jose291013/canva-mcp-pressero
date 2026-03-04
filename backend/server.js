@@ -723,8 +723,5 @@ const port = process.env.PORT || 10000;
 app.listen(port, () => console.log("🚀 Backend listening on", port));
 
 
-const port = process.env.PORT || 10000;
-app.listen(port, () => console.log("🚀 Backend listening on", port));
-
 
 
